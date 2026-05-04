@@ -1,66 +1,101 @@
 require("dotenv").config()
+
 const express = require("express")
 const cors = require("cors")
+const morgan = require("morgan")
+const helmet = require("helmet")
+
 const connectDB = require("./config/db")
+const { apiLimiter, authLimiter } = require("./middleware/ratelimiter") // ✅ FIX
+const { notFound, errorHandler } = require("./middleware/errorMiddleware")
 
 const app = express()
 
-// ✅ Connect Database
+//
+// 🔌 CONNECT DATABASE
+//
 connectDB()
 
-// ✅ CORS CONFIG (VERY IMPORTANT FOR VERCEL)
-const allowedOrigins = [
-  "http://localhost:5173", // local frontend (Vite)
-  "https://authentication-three-lemon.vercel.app" // your deployed frontend
-]
+//
+// 🔥 TRUST PROXY (important for deployment)
+//
+app.set("trust proxy", 1)
+
+//
+// ⚙️ BASIC SECURITY
+//
+app.use(helmet())
+
+//
+// 🪵 LOGGER (only in dev)
+//
+if (process.env.NODE_ENV !== "production") {
+  app.use(morgan("dev"))
+}
+
+//
+// 🌐 CORS (dynamic from .env)
+//
+const allowedOrigins = process.env.ALLOWED_ORIGINS
+  ? process.env.ALLOWED_ORIGINS.split(",")
+  : ["http://localhost:5173", "http://localhost:3000"]
 
 app.use(
   cors({
-    origin: function (origin, callback) {
-      // allow requests with no origin (like Postman)
+    origin: (origin, callback) => {
       if (!origin) return callback(null, true)
 
       if (allowedOrigins.includes(origin)) {
-        callback(null, true)
-      } else {
-        callback(new Error("Not allowed by CORS"))
+        return callback(null, true)
       }
+
+      return callback(new Error("❌ Not allowed by CORS"))
     },
     credentials: true
   })
 )
 
-// ✅ Middleware
-app.use(express.json())
+//
+// 🧾 BODY PARSER
+//
+app.use(express.json({ limit: "10kb" }))
 
-// ✅ Routes
+//
+// 🚦 RATE LIMIT
+//
+app.use("/api", apiLimiter)        // ✅ FIX
+app.use("/api/auth", authLimiter)  // ✅ FIX (stronger for login/signup)
+
+//
+// 📡 ROUTES
+//
 app.use("/api/auth", require("./routes/authRoutes"))
 app.use("/api/tasks", require("./routes/taskRoutes"))
 
-// ✅ Health Check Route
+//
+// 🏠 ROOT ROUTE
+//
 app.get("/", (req, res) => {
-  res.status(200).send("🚀 API is running...")
-})
-
-// ❌ Handle Unknown Routes
-app.use((req, res) => {
-  res.status(404).json({
-    success: false,
-    message: "Route not found"
+  res.status(200).json({
+    success: true,
+    message: "🚀 Task Optimizer API is running",
+    env: process.env.NODE_ENV || "development"
   })
 })
 
-// ❌ Global Error Handler (VERY IMPORTANT)
-app.use((err, req, res, next) => {
-  console.error(err.stack)
+//
+// ❌ 404 HANDLER
+//
+app.use(notFound)
 
-  res.status(500).json({
-    success: false,
-    message: err.message || "Server Error"
-  })
-})
+//
+// 🚨 GLOBAL ERROR HANDLER
+//
+app.use(errorHandler)
 
-// ✅ Start Server
+//
+// 🚀 START SERVER
+//
 const PORT = process.env.PORT || 5000
 
 app.listen(PORT, () => {

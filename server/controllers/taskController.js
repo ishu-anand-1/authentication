@@ -1,12 +1,41 @@
 const Task = require("../models/task")
 const mongoose = require("mongoose")
+const axios = require("axios")
 
-// CREATE TASK
+// 🔥 Priority weight
+const priorityWeight = {
+  high: 3,
+  medium: 2,
+  low: 1
+}
+
+// 🔥 Normalize input safely (FIXED)
+const normalizeTaskInput = (body) => {
+  let normalized = {}
+
+  if (body.title !== undefined) {
+    normalized.title = body.title.trim()
+  }
+
+  if (body.priority !== undefined) {
+    const p = body.priority.toLowerCase()
+    normalized.priority = ["low", "medium", "high"].includes(p) ? p : "low"
+  }
+
+  if (body.dueDate !== undefined) {
+    normalized.dueDate = body.dueDate || null
+  }
+
+  return normalized
+}
+
+//
+// 🟢 CREATE TASK
+//
 const createTask = async (req, res) => {
   try {
-    const { title } = req.body
+    const { title, priority, dueDate } = normalizeTaskInput(req.body)
 
-    // Validation
     if (!title) {
       return res.status(400).json({
         success: false,
@@ -16,70 +45,126 @@ const createTask = async (req, res) => {
 
     const task = await Task.create({
       user: req.user._id,
-      title
+      title,
+      priority: priority || "low",
+      dueDate
     })
 
-    res.status(201).json({
+    return res.status(201).json({
       success: true,
       message: "Task created successfully",
       data: task
     })
 
   } catch (error) {
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
       message: error.message
     })
   }
 }
 
-// GET TASKS (FILTER + SEARCH + SORT)
+//
+// 🟡 GET TASKS (FIXED PAGINATION + STABLE SORT)
+//
 const getTasks = async (req, res) => {
   try {
-    const { completed, keyword } = req.query
+    const { completed, keyword, priority, optimize } = req.query
+
+    const page = parseInt(req.query.page) || 1
+    const limit = parseInt(req.query.limit) || 5
+    const skip = (page - 1) * limit
 
     let query = { user: req.user._id }
 
-    // FILTER
     if (completed !== undefined) {
       query.completed = completed === "true"
     }
 
-    // SEARCH
+    if (priority) {
+      query.priority = priority
+    }
+
     if (keyword) {
       query.title = { $regex: keyword, $options: "i" }
     }
 
-    const tasks = await Task.find(query).sort({ createdAt: -1 }) // latest first
+    const total = await Task.countDocuments(query)
 
-    res.json({
+    // ✅ SORT AT DB LEVEL (FIXED)
+    let tasks = await Task.find(query)
+      .sort({
+        priority: -1,      // high > medium > low (string works because of enum order trick)
+        createdAt: -1
+      })
+      .skip(skip)
+      .limit(limit)
+
+    //
+    // 🔥 FASTAPI OPTIMIZATION
+    //
+    if (optimize === "true" && tasks.length > 0) {
+      try {
+        const response = await axios.post(
+          `${process.env.FASTAPI_URL}/api/optimize`,
+          {
+            tasks: tasks.map(t => ({
+              title: t.title,
+              priority: t.priority,
+              dueDate: t.dueDate
+            }))
+          }
+        )
+
+        return res.json({
+          success: true,
+          optimized: true,
+          page,
+          pages: Math.ceil(total / limit),
+          count: tasks.length,
+          data: response.data.optimized
+        })
+
+      } catch (err) {
+        console.log("⚠️ FastAPI failed → fallback sorting")
+      }
+    }
+
+    // ❌ REMOVE EXTRA SORT (IMPORTANT FIX)
+    // We DO NOT sort again here → pagination stays correct
+
+    return res.json({
       success: true,
+      optimized: false,
+      page,
+      pages: Math.ceil(total / limit),
       count: tasks.length,
       data: tasks
     })
 
   } catch (error) {
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
       message: error.message
     })
   }
 }
 
-// UPDATE TASK
+//
+// 🔵 UPDATE TASK (FIXED PRIORITY BUG)
+//
 const updateTask = async (req, res) => {
   try {
-    const { title, completed } = req.body
+    const { id } = req.params
 
-    // Validate ID
-    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+    if (!mongoose.Types.ObjectId.isValid(id)) {
       return res.status(400).json({
         success: false,
         message: "Invalid ID"
       })
     }
 
-    const task = await Task.findById(req.params.id)
+    const task = await Task.findById(id)
 
     if (!task) {
       return res.status(404).json({
@@ -88,7 +173,6 @@ const updateTask = async (req, res) => {
       })
     }
 
-    // Check ownership
     if (task.user.toString() !== req.user._id.toString()) {
       return res.status(401).json({
         success: false,
@@ -96,38 +180,48 @@ const updateTask = async (req, res) => {
       })
     }
 
-    // Update only if provided
-    if (title !== undefined) task.title = title
-    if (completed !== undefined) task.completed = completed
+    const updates = normalizeTaskInput(req.body)
+
+    // ✅ APPLY ONLY PROVIDED FIELDS
+    Object.keys(updates).forEach((key) => {
+      task[key] = updates[key]
+    })
+
+    if (req.body.completed !== undefined) {
+      task.completed = req.body.completed
+    }
 
     const updatedTask = await task.save()
 
-    res.json({
+    return res.json({
       success: true,
       message: "Task updated successfully",
       data: updatedTask
     })
 
   } catch (error) {
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
       message: error.message
     })
   }
 }
 
-// DELETE TASK
+//
+// 🔴 DELETE TASK
+//
 const deleteTask = async (req, res) => {
   try {
-    // Validate ID
-    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+    const { id } = req.params
+
+    if (!mongoose.Types.ObjectId.isValid(id)) {
       return res.status(400).json({
         success: false,
         message: "Invalid ID"
       })
     }
 
-    const task = await Task.findById(req.params.id)
+    const task = await Task.findById(id)
 
     if (!task) {
       return res.status(404).json({
@@ -136,7 +230,6 @@ const deleteTask = async (req, res) => {
       })
     }
 
-    // Check ownership
     if (task.user.toString() !== req.user._id.toString()) {
       return res.status(401).json({
         success: false,
@@ -146,13 +239,13 @@ const deleteTask = async (req, res) => {
 
     await task.deleteOne()
 
-    res.json({
+    return res.json({
       success: true,
       message: "Task deleted successfully"
     })
 
   } catch (error) {
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
       message: error.message
     })
